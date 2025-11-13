@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1763012952597,
+      "tag": "0000_supreme_overlord",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1763013025316,
+      "tag": "0001_ambiguous_morg",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1763019932694,
+      "tag": "0002_supreme_thena",
+      "breakpoints": true
+    }
+  ]
+}

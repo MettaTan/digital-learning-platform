@@ -1,263 +1,351 @@
-import { useState, useEffect, useMemo } from "react";
-import { useRoute, useLocation } from "wouter";
-import { trpc } from "@/lib/trpc";
+import { useEffect, useState } from "react";
+import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Loader2 } from "lucide-react";
+import { trpc } from "@/lib/trpc";
+import { toast } from "sonner";
+import { Loader2, ArrowRight, CheckCircle2, XCircle } from "lucide-react";
+import type { SimpleUser } from "../../../drizzle/schema";
+
+type QuizQuestion = {
+  id: number;
+  question: string;
+  optionA: string;
+  optionB: string;
+  optionC: string;
+  optionD: string;
+  difficulty?: string;
+  category?: string | null;
+};
+
+type Answer = "A" | "B" | "C" | "D";
 
 export default function Quiz() {
-  const [, params] = useRoute("/quiz/:id");
   const [, setLocation] = useLocation();
-  const quizId = params?.id ? parseInt(params.id) : null;
-
+  const [currentUser, setCurrentUser] = useState<SimpleUser | null>(null);
+  const [questions, setQuestions] = useState<QuizQuestion[]>([]);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
-  const [selectedAnswers, setSelectedAnswers] = useState<Record<number, "A" | "B" | "C" | "D">>({});
+  const [selectedAnswer, setSelectedAnswer] = useState<Answer | null>(null);
+  const [userAnswers, setUserAnswers] = useState<{ questionId: number; userAnswer: Answer }[]>([]);
+  const [quizCompleted, setQuizCompleted] = useState(false);
+  const [quizResult, setQuizResult] = useState<any>(null);
 
-  const { data: isCompleted } = trpc.quiz.checkCompleted.useQuery(
-    { quizId: quizId! },
-    { enabled: !!quizId }
+  const { data: questionsData, isLoading: loadingQuestions } = trpc.quiz.getQuestions.useQuery(
+    { limit: 10 },
+    { enabled: !!currentUser }
   );
+  
+  const submitMutation = trpc.quiz.submitAttempt.useMutation();
 
-  const { data: quiz, isLoading: quizLoading } = trpc.quiz.getById.useQuery(
-    { quizId: quizId! },
-    { enabled: !!quizId }
-  );
+  useEffect(() => {
+    const userStr = localStorage.getItem("currentUser");
+    if (!userStr) {
+      setLocation("/");
+      return;
+    }
+    setCurrentUser(JSON.parse(userStr));
+  }, [setLocation]);
 
-  const { data: questions, isLoading: questionsLoading } = trpc.quiz.getQuestions.useQuery(
-    { quizId: quizId! },
-    { enabled: !!quizId }
-  );
+  useEffect(() => {
+    if (questionsData) {
+      setQuestions(questionsData as QuizQuestion[]);
+    }
+  }, [questionsData]);
 
-  const submitQuizMutation = trpc.quiz.submitQuiz.useMutation({
-    onSuccess: (data) => {
-      setLocation(`/quiz/${quizId}/results?score=${data.score}&total=${data.totalQuestions}&credits=${data.creditsEarned}`);
-    },
-  });
+  const currentQuestion = questions[currentQuestionIndex];
+  const progress = ((currentQuestionIndex + 1) / questions.length) * 100;
 
-  const currentQuestion = questions?.[currentQuestionIndex];
-  const isLastQuestion = currentQuestionIndex === (questions?.length ?? 0) - 1;
-
-  const handleAnswerSelect = (answer: "A" | "B" | "C" | "D") => {
-    if (!currentQuestion) return;
-    setSelectedAnswers((prev) => ({
-      ...prev,
-      [currentQuestion.id]: answer,
-    }));
+  const handleAnswerSelect = (answer: Answer) => {
+    setSelectedAnswer(answer);
   };
 
   const handleNext = () => {
-    if (isLastQuestion) {
-      // Submit quiz
-      if (!questions) return;
-      const answers = questions.map((q) => ({
-        questionId: q.id,
-        selectedAnswer: selectedAnswers[q.id] || "A",
-      }));
-      submitQuizMutation.mutate({ quizId: quizId!, answers });
+    if (!selectedAnswer) {
+      toast.error("Please select an answer");
+      return;
+    }
+
+    // Save answer
+    setUserAnswers([
+      ...userAnswers,
+      { questionId: currentQuestion.id, userAnswer: selectedAnswer },
+    ]);
+
+    // Move to next question or finish
+    if (currentQuestionIndex < questions.length - 1) {
+      setCurrentQuestionIndex(currentQuestionIndex + 1);
+      setSelectedAnswer(null);
     } else {
-      setCurrentQuestionIndex((prev) => prev + 1);
+      // Submit quiz
+      handleSubmitQuiz([
+        ...userAnswers,
+        { questionId: currentQuestion.id, userAnswer: selectedAnswer },
+      ]);
     }
   };
 
-  const selectedAnswer = currentQuestion ? selectedAnswers[currentQuestion.id] : undefined;
+  const handleSubmitQuiz = async (answers: { questionId: number; userAnswer: Answer }[]) => {
+    if (!currentUser) return;
 
-  if (!quizId) {
+    try {
+      const result = await submitMutation.mutateAsync({
+        userId: currentUser.id,
+        answers,
+      });
+      
+      setQuizResult(result);
+      setQuizCompleted(true);
+      
+      // Update user credits in localStorage
+      const updatedUser = { ...currentUser, credits: currentUser.credits + result.creditsEarned };
+      localStorage.setItem("currentUser", JSON.stringify(updatedUser));
+      setCurrentUser(updatedUser);
+    } catch (error) {
+      toast.error("Failed to submit quiz");
+    }
+  };
+
+  const handlePlayAgain = () => {
+    setCurrentQuestionIndex(0);
+    setSelectedAnswer(null);
+    setUserAnswers([]);
+    setQuizCompleted(false);
+    setQuizResult(null);
+    setLocation("/dashboard");
+  };
+
+  if (!currentUser) return null;
+
+  if (loadingQuestions) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p>Invalid quiz ID</p>
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="text-center">
+          <Loader2 className="w-12 h-12 animate-spin text-primary mx-auto mb-4" />
+          <p className="text-muted-foreground">Loading quiz...</p>
+        </div>
       </div>
     );
   }
 
-  if (quizLoading || questionsLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin" />
-      </div>
-    );
+  if (quizCompleted && quizResult) {
+    return <QuizResults result={quizResult} onPlayAgain={handlePlayAgain} />;
   }
 
-  if (!quiz || !questions || questions.length === 0) {
+  if (!currentQuestion) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p>Quiz not found</p>
-      </div>
-    );
-  }
-
-  if (isCompleted) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-purple-50 to-blue-50">
-        <Card className="p-8 max-w-md text-center">
-          <div className="text-6xl mb-4">✅</div>
-          <h2 className="text-2xl font-bold mb-4 text-gray-800">Quiz Already Completed</h2>
-          <p className="text-gray-600 mb-6">You have already completed this quiz. Each quiz can only be taken once.</p>
-          <div className="flex gap-3">
-            <Button
-              onClick={() => setLocation("/dashboard")}
-              className="flex-1 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
-            >
-              Back to Dashboard
-            </Button>
-            <Button
-              onClick={() => setLocation("/rewards")}
-              variant="outline"
-              className="flex-1"
-            >
-              View Rewards
-            </Button>
-          </div>
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <Card className="p-8 text-center">
+          <p className="text-muted-foreground">No questions available</p>
+          <Button onClick={() => setLocation("/dashboard")} className="mt-4">
+            Back to Dashboard
+          </Button>
         </Card>
       </div>
     );
   }
 
+  const optionColors = {
+    A: "from-[oklch(0.82_0.15_85)] to-[oklch(0.75_0.12_85)]", // Yellow
+    B: "from-[oklch(0.63_0.21_260)] to-[oklch(0.55_0.18_260)]", // Blue
+    C: "from-[oklch(0.62_0.23_25)] to-[oklch(0.55_0.20_25)]", // Red/Coral
+    D: "from-[oklch(0.58_0.24_290)] to-[oklch(0.50_0.20_290)]", // Purple
+  };
+
   return (
-    <div className="min-h-screen relative overflow-hidden bg-gradient-to-br from-purple-600 via-purple-700 to-purple-800">
-      {/* Animated background shapes */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        {/* Top left blue blob */}
-        <div className="absolute -top-20 -left-20 w-96 h-96 bg-blue-400 rounded-full mix-blend-multiply filter blur-3xl opacity-70 animate-pulse-slow" />
-        
-        {/* Top right pink blob */}
-        <div className="absolute -top-10 right-0 w-80 h-80 bg-pink-500 rounded-full mix-blend-multiply filter blur-3xl opacity-60 animate-pulse-slow" style={{ animationDelay: '1s' }} />
-        
-        {/* Bottom left yellow blob */}
-        <div className="absolute bottom-0 -left-10 w-96 h-96 bg-yellow-400 rounded-full mix-blend-multiply filter blur-3xl opacity-50 animate-pulse-slow" style={{ animationDelay: '2s' }} />
+    <div className="min-h-screen bg-gradient-to-br from-[oklch(0.58_0.24_290)] via-[oklch(0.50_0.20_290)] to-[oklch(0.45_0.18_280)] relative overflow-hidden">
+      {/* Decorative shapes */}
+      <div className="absolute top-10 left-10 w-32 h-32 rounded-full bg-secondary/20 blur-3xl"></div>
+      <div className="absolute bottom-20 right-10 w-40 h-40 rounded-full bg-accent/20 blur-3xl"></div>
+      <div className="absolute top-1/3 right-1/4 w-24 h-24 rounded-full bg-destructive/20 blur-2xl"></div>
+      
+      {/* Abstract decorative elements */}
+      <svg className="absolute top-20 right-20 w-24 h-24 text-white/20" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="40" fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray="10,5" />
+      </svg>
+      <svg className="absolute bottom-32 left-32 w-32 h-32 text-white/20" viewBox="0 0 100 100">
+        <path d="M 10 50 L 90 50 M 50 10 L 50 90" stroke="currentColor" strokeWidth="3" />
+        <path d="M 20 20 L 80 80 M 80 20 L 20 80" stroke="currentColor" strokeWidth="2" />
+      </svg>
 
-        {/* Geometric shapes */}
-        <svg className="absolute top-20 left-10 w-16 h-16 text-white opacity-20 animate-float" viewBox="0 0 100 100">
-          <path d="M 10 50 L 50 10 L 90 50 L 50 90 Z" fill="currentColor" />
-        </svg>
-
-        <svg className="absolute top-40 right-20 w-12 h-12 text-white opacity-20 animate-float" style={{ animationDelay: '1s' }} viewBox="0 0 100 100">
-          <circle cx="50" cy="50" r="40" fill="currentColor" />
-        </svg>
-
-        <svg className="absolute bottom-40 left-1/4 w-20 h-20 text-white opacity-15 animate-float" style={{ animationDelay: '2s' }} viewBox="0 0 100 100">
-          <polygon points="50,10 90,90 10,90" fill="currentColor" />
-        </svg>
-
-        <svg className="absolute top-1/3 right-1/4 w-24 h-24 text-white opacity-10 animate-float" style={{ animationDelay: '3s' }} viewBox="0 0 100 100">
-          <path d="M 20 20 L 80 20 L 80 80 L 20 80 Z" fill="none" stroke="currentColor" strokeWidth="3" />
-        </svg>
-
-        {/* Wavy lines */}
-        <svg className="absolute top-1/4 left-20 w-32 h-8 text-white opacity-20" viewBox="0 0 100 20">
-          <path d="M 0 10 Q 25 0, 50 10 T 100 10" fill="none" stroke="currentColor" strokeWidth="2" />
-        </svg>
-
-        {/* Diagonal lines */}
-        <div className="absolute top-32 right-40 w-16 h-1 bg-white opacity-20 rotate-45" />
-        <div className="absolute top-36 right-44 w-12 h-1 bg-white opacity-20 rotate-45" />
-        <div className="absolute bottom-1/3 left-1/3 w-20 h-1 bg-white opacity-15 -rotate-45" />
-
-        {/* Circles */}
-        <div className="absolute bottom-20 right-32 w-20 h-20 border-4 border-white opacity-20 rounded-full" />
-        <div className="absolute top-1/2 left-16 w-8 h-8 bg-white opacity-25 rounded-full" />
-        <div className="absolute bottom-1/4 right-1/4 w-6 h-6 bg-white opacity-30 rounded-full animate-pulse" />
-
-        {/* Striped pattern */}
-        <div className="absolute bottom-32 left-40 w-24 h-24 opacity-15">
-          <div className="space-y-1">
-            {[...Array(8)].map((_, i) => (
-              <div key={i} className="h-0.5 bg-white" style={{ width: `${100 - i * 10}%` }} />
-            ))}
+      <div className="relative z-10 container mx-auto px-4 py-8 flex flex-col items-center justify-center min-h-screen">
+        {/* Progress bar */}
+        <div className="w-full max-w-3xl mb-8">
+          <div className="flex justify-between items-center mb-2 text-white">
+            <span className="text-sm font-medium">Question {currentQuestionIndex + 1}/{questions.length}</span>
+            <span className="text-sm font-medium">{Math.round(progress)}%</span>
+          </div>
+          <div className="w-full bg-white/20 rounded-full h-3 overflow-hidden">
+            <div
+              className="bg-secondary h-full transition-all duration-300 rounded-full"
+              style={{ width: `${progress}%` }}
+            ></div>
           </div>
         </div>
-      </div>
 
-      {/* Content */}
-      <div className="relative z-10 container mx-auto px-4 py-8 min-h-screen flex flex-col">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-white text-2xl font-semibold">{quiz.title}</h1>
-        </div>
-
-        {/* Quiz Card */}
-        <div className="flex-1 flex items-center justify-center">
-          <Card className="w-full max-w-3xl bg-white/95 backdrop-blur-sm shadow-2xl p-8 md:p-12">
-            {/* Progress */}
-            <div className="text-center mb-8">
-              <p className="text-lg font-semibold text-purple-700">
-                Question {currentQuestionIndex + 1}/{questions.length}
+        {/* Question card */}
+        <Card className="w-full max-w-3xl p-8 md:p-12 bg-white/95 backdrop-blur-sm shadow-2xl animate-slide-in">
+          <div className="mb-8">
+            <h2 className="text-2xl md:text-3xl font-bold text-foreground mb-4 text-center">
+              {currentQuestion.question}
+            </h2>
+            {currentQuestion.category && (
+              <p className="text-center text-sm text-muted-foreground">
+                Category: {currentQuestion.category}
               </p>
-            </div>
+            )}
+          </div>
 
-            {/* Question */}
-            <div className="mb-10">
-              <h2 className="text-xl md:text-2xl font-semibold text-gray-800 text-center leading-relaxed">
-                {currentQuestion?.questionText}
-              </h2>
-            </div>
-
-            {/* Options */}
-            <div className="space-y-4 mb-10">
-              {["A", "B", "C", "D"].map((option) => {
-                const optionKey = `option${option}` as keyof typeof currentQuestion;
-                const optionText = String(currentQuestion?.[optionKey] || "");
-                const isSelected = selectedAnswer === option;
-                
-                let bgColor = "bg-gray-100 hover:bg-gray-200";
-                let textColor = "text-gray-800";
-                let borderColor = "border-gray-300";
-                
-                if (isSelected) {
-                  if (option === "A") {
-                    bgColor = "bg-purple-100 border-purple-400";
-                    textColor = "text-purple-900";
-                    borderColor = "border-purple-400";
-                  } else if (option === "B") {
-                    bgColor = "bg-blue-100 border-blue-400";
-                    textColor = "text-blue-900";
-                    borderColor = "border-blue-400";
-                  } else if (option === "C") {
-                    bgColor = "bg-pink-100 border-pink-400";
-                    textColor = "text-pink-900";
-                    borderColor = "border-pink-400";
-                  } else if (option === "D") {
-                    bgColor = "bg-purple-100 border-purple-400";
-                    textColor = "text-purple-900";
-                    borderColor = "border-purple-400";
-                  }
-                }
-
-                return (
-                  <button
-                    key={option}
-                    onClick={() => handleAnswerSelect(option as "A" | "B" | "C" | "D")}
-                    className={`w-full p-4 rounded-xl border-2 transition-all duration-200 ${bgColor} ${borderColor} ${textColor} text-left flex items-center gap-4 hover:scale-[1.02] active:scale-[0.98]`}
-                  >
-                    <span className="flex-shrink-0 w-10 h-10 rounded-lg bg-white/80 flex items-center justify-center font-bold text-lg">
+          {/* Options */}
+          <div className="grid gap-4 mb-8">
+            {(["A", "B", "C", "D"] as Answer[]).map((option) => {
+              const optionText = currentQuestion[`option${option}` as keyof QuizQuestion] as string;
+              const isSelected = selectedAnswer === option;
+              
+              return (
+                <button
+                  key={option}
+                  onClick={() => handleAnswerSelect(option)}
+                  className={`quiz-option p-6 rounded-xl text-left transition-all ${
+                    isSelected
+                      ? "ring-4 ring-primary ring-offset-2 scale-105"
+                      : "hover:scale-102"
+                  } bg-gradient-to-r ${optionColors[option]} text-white shadow-lg`}
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="w-10 h-10 rounded-full bg-white/30 flex items-center justify-center font-bold text-lg flex-shrink-0">
                       {option}
-                    </span>
-                    <span className="font-medium">{optionText}</span>
-                  </button>
-                );
-              })}
-            </div>
+                    </div>
+                    <p className="text-lg font-medium">{optionText}</p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
 
-            {/* Next Button */}
-            <div className="flex justify-center">
-              <Button
-                onClick={handleNext}
-                disabled={!selectedAnswer || submitQuizMutation.isPending}
-                className="px-12 py-6 text-lg font-semibold bg-purple-600 hover:bg-purple-700 text-white rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {submitQuizMutation.isPending ? (
-                  <>
-                    <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                    Submitting...
-                  </>
-                ) : isLastQuestion ? (
-                  "Submit"
-                ) : (
-                  "Next"
-                )}
-              </Button>
+          {/* Next button */}
+          <Button
+            onClick={handleNext}
+            disabled={!selectedAnswer || submitMutation.isPending}
+            className="w-full py-6 text-lg font-semibold bg-primary hover:bg-primary/90 text-primary-foreground"
+            size="lg"
+          >
+            {submitMutation.isPending ? (
+              <>
+                <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                Submitting...
+              </>
+            ) : currentQuestionIndex < questions.length - 1 ? (
+              <>
+                Next
+                <ArrowRight className="ml-2 h-5 w-5" />
+              </>
+            ) : (
+              "Finish Quiz"
+            )}
+          </Button>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function QuizResults({ result, onPlayAgain }: { result: any; onPlayAgain: () => void }) {
+  const percentage = (result.score / result.totalQuestions) * 100;
+  const passed = percentage >= 50;
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-[oklch(0.82_0.15_85)] via-[oklch(0.75_0.12_85)] to-[oklch(0.70_0.10_80)] relative overflow-hidden flex items-center justify-center">
+      {/* Decorative elements */}
+      <div className="absolute top-10 left-10 w-40 h-40 rounded-full bg-primary/20 blur-3xl animate-pulse"></div>
+      <div className="absolute bottom-20 right-10 w-48 h-48 rounded-full bg-accent/20 blur-3xl animate-pulse" style={{ animationDelay: "1s" }}></div>
+      <div className="absolute top-1/3 right-1/3 w-32 h-32 rounded-full bg-success/20 blur-2xl animate-pulse" style={{ animationDelay: "0.5s" }}></div>
+      
+      {/* Abstract shapes */}
+      <svg className="absolute top-20 right-20 w-32 h-32 text-white/30" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="45" fill="none" stroke="currentColor" strokeWidth="3" />
+        <circle cx="50" cy="50" r="30" fill="none" stroke="currentColor" strokeWidth="2" />
+        <circle cx="50" cy="50" r="15" fill="currentColor" />
+      </svg>
+      <svg className="absolute bottom-32 left-32 w-40 h-40 text-white/30" viewBox="0 0 100 100">
+        <polygon points="50,10 90,90 10,90" fill="none" stroke="currentColor" strokeWidth="3" />
+        <polygon points="50,30 70,70 30,70" fill="currentColor" />
+      </svg>
+
+      <div className="relative z-10 container mx-auto px-4 py-8">
+        <Card className="max-w-2xl mx-auto p-12 bg-white/95 backdrop-blur-sm shadow-2xl text-center animate-slide-in">
+          <h2 className="text-4xl md:text-5xl font-bold text-foreground mb-6">
+            {passed ? "Bravo! You have Scored" : "Quiz Completed!"}
+          </h2>
+
+          {/* Score display */}
+          <div className="my-12">
+            <div className="text-8xl md:text-9xl font-black text-primary mb-4">
+              {result.score}
+              <span className="text-5xl md:text-6xl text-muted-foreground">/{result.totalQuestions}</span>
             </div>
-          </Card>
-        </div>
+            <div className="text-2xl text-muted-foreground mb-6">
+              {percentage.toFixed(0)}% Correct
+            </div>
+            <div className="inline-flex items-center gap-2 bg-secondary/20 px-6 py-3 rounded-full">
+              <span className="text-xl font-semibold text-foreground">
+                +{result.creditsEarned} Credits Earned! 🎉
+              </span>
+            </div>
+          </div>
+
+          {/* Feedback section */}
+          {result.feedback && result.feedback.length > 0 && (
+            <div className="mb-8 text-left">
+              <h3 className="text-2xl font-bold text-foreground mb-4">Review Your Answers</h3>
+              <div className="space-y-3 max-h-64 overflow-y-auto">
+                {result.feedback.map((item: any, index: number) => (
+                  <div
+                    key={index}
+                    className={`p-4 rounded-lg border-2 ${
+                      item.isCorrect
+                        ? "bg-success/10 border-success/30"
+                        : "bg-destructive/10 border-destructive/30"
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      {item.isCorrect ? (
+                        <CheckCircle2 className="w-6 h-6 text-success flex-shrink-0 mt-1" />
+                      ) : (
+                        <XCircle className="w-6 h-6 text-destructive flex-shrink-0 mt-1" />
+                      )}
+                      <div className="flex-1">
+                        <p className="font-medium text-foreground mb-1">{item.question}</p>
+                        <div className="text-sm">
+                          <span className="text-muted-foreground">Your answer: </span>
+                          <span className={item.isCorrect ? "text-success font-semibold" : "text-destructive font-semibold"}>
+                            {item.userAnswer}
+                          </span>
+                          {!item.isCorrect && (
+                            <>
+                              <span className="text-muted-foreground"> | Correct: </span>
+                              <span className="text-success font-semibold">{item.correctAnswer}</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Action buttons */}
+          <div className="flex flex-col sm:flex-row gap-4 justify-center mt-8">
+            <Button
+              onClick={onPlayAgain}
+              size="lg"
+              className="text-lg font-semibold px-8 py-6 bg-primary hover:bg-primary/90 text-primary-foreground"
+            >
+              Back to Dashboard
+            </Button>
+          </div>
+        </Card>
       </div>
     </div>
   );

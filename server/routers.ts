@@ -1,10 +1,11 @@
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
+import { publicProcedure, router } from "./_core/trpc";
 import { z } from "zod";
 import * as db from "./db";
-import { TRPCError } from "@trpc/server";
+import { quizAttempts } from "../drizzle/schema";
+import { eq } from "drizzle-orm";
 
 export const appRouter = router({
   system: systemRouter,
@@ -19,235 +20,387 @@ export const appRouter = router({
     }),
   }),
 
+  // Simple user management (name-based login)
+  simpleAuth: router({
+    login: publicProcedure
+      .input(z.object({ name: z.string().min(1).max(255) }))
+      .mutation(async ({ input }) => {
+        const user = await db.createOrGetSimpleUser(input.name);
+        return user;
+      }),
+    
+    getUser: publicProcedure
+      .input(z.object({ id: z.number() }))
+      .query(async ({ input }) => {
+        return await db.getSimpleUserById(input.id);
+      }),
+  }),
+
+  // Quiz operations
   quiz: router({
-    list: publicProcedure.query(async () => {
-      return await db.getAllQuizzes();
+    // Initialize database with sample questions
+    seedQuestions: publicProcedure.mutation(async () => {
+      await db.seedQuizQuestions();
+      return { success: true };
     }),
 
-    getById: publicProcedure
-      .input(z.object({ quizId: z.number() }))
-      .query(async ({ input }) => {
-        const quiz = await db.getQuizById(input.quizId);
-        if (!quiz) {
-          throw new TRPCError({ code: "NOT_FOUND", message: "Quiz not found" });
-        }
-        return quiz;
-      }),
-
+    // Get random quiz questions
     getQuestions: publicProcedure
-      .input(z.object({ quizId: z.number() }))
+      .input(z.object({ limit: z.number().default(10) }))
       .query(async ({ input }) => {
-        return await db.getQuestionsByQuizId(input.quizId);
+        const questions = await db.getRandomQuizQuestions(input.limit);
+        // Return questions without correct answers for security
+        return questions.map(q => ({
+          id: q.id,
+          question: q.question,
+          optionA: q.optionA,
+          optionB: q.optionB,
+          optionC: q.optionC,
+          optionD: q.optionD,
+          difficulty: q.difficulty,
+          category: q.category,
+        }));
       }),
 
-    checkCompleted: protectedProcedure
-      .input(z.object({ quizId: z.number() }))
-      .query(async ({ ctx, input }) => {
-        return await db.hasUserCompletedQuiz(ctx.user.id, input.quizId);
-      }),
+    // Submit quiz attempt
+    submitAttempt: publicProcedure
+      .input(z.object({
+        userId: z.number(),
+        answers: z.array(z.object({
+          questionId: z.number(),
+          userAnswer: z.enum(["A", "B", "C", "D"]),
+        })),
+      }))
+      .mutation(async ({ input }) => {
+        // Validate answers and calculate score
+        let score = 0;
+        const totalQuestions = input.answers.length;
+        const feedback: Array<{
+          questionId: number;
+          question: string;
+          userAnswer: string;
+          correctAnswer: string;
+          isCorrect: boolean;
+        }> = [];
 
-    submitQuiz: protectedProcedure
-      .input(
-        z.object({
-          quizId: z.number(),
-          answers: z.array(
-            z.object({
-              questionId: z.number(),
-              selectedAnswer: z.enum(["A", "B", "C", "D"]),
-            })
-          ),
-        })
-      )
-      .mutation(async ({ ctx, input }) => {
-        const hasCompleted = await db.hasUserCompletedQuiz(ctx.user.id, input.quizId);
-        if (hasCompleted) {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: "You have already completed this quiz",
-          });
-        }
-
-        const quiz = await db.getQuizById(input.quizId);
-        if (!quiz) {
-          throw new TRPCError({ code: "NOT_FOUND", message: "Quiz not found" });
-        }
-
-        const questions = await db.getQuestionsByQuizId(input.quizId);
+        // Create quiz attempt
         const attemptId = await db.createQuizAttempt({
-          userId: ctx.user.id,
-          quizId: input.quizId,
-          score: 0,
-          totalQuestions: questions.length,
-          completed: false,
-          creditsEarned: 0,
+          userId: input.userId,
+          score: 0, // Will update after calculating
+          totalQuestions,
         });
 
-        let correctCount = 0;
-        const results = [];
-
+        // Process each answer
         for (const answer of input.answers) {
-          const question = questions.find((q) => q.id === answer.questionId);
+          const question = await db.getQuestionById(answer.questionId);
           if (!question) continue;
 
-          const isCorrect = question.correctAnswer === answer.selectedAnswer;
-          if (isCorrect) correctCount++;
+          const isCorrect = answer.userAnswer === question.correctAnswer;
+          if (isCorrect) score++;
 
-          await db.saveUserAnswer({
+          // Save answer
+          await db.saveQuizAnswer({
             attemptId,
             questionId: answer.questionId,
-            selectedAnswer: answer.selectedAnswer,
-            isCorrect,
+            userAnswer: answer.userAnswer,
+            isCorrect: isCorrect ? 1 : 0,
           });
 
-          results.push({
+          // Add to feedback
+          feedback.push({
             questionId: answer.questionId,
-            isCorrect,
+            question: question.question,
+            userAnswer: answer.userAnswer,
             correctAnswer: question.correctAnswer,
+            isCorrect,
           });
         }
 
-        const creditsEarned = Math.floor((correctCount / questions.length) * quiz.creditsReward);
-        await db.updateQuizAttempt(attemptId, correctCount, creditsEarned);
-        await db.updateUserCredits(ctx.user.id, creditsEarned);
-        await db.addCreditTransaction({
-          userId: ctx.user.id,
-          amount: creditsEarned,
-          type: "earned",
-          description: `Completed quiz: ${quiz.title}`,
-          relatedId: attemptId,
-        });
+        // Update attempt with final score
+        const db_instance = await db.getDb();
+        if (db_instance) {
+          await db_instance
+            .update(quizAttempts)
+            .set({ score })
+            .where(eq(quizAttempts.id, attemptId));
+        }
+
+        // Award credits based on performance
+        const creditsEarned = Math.floor(score * 10); // 10 credits per correct answer
+        const user = await db.getSimpleUserById(input.userId);
+        if (user) {
+          await db.updateUserCredits(input.userId, user.credits + creditsEarned);
+        }
 
         return {
-          score: correctCount,
-          totalQuestions: questions.length,
+          attemptId,
+          score,
+          totalQuestions,
           creditsEarned,
-          results,
+          feedback,
         };
       }),
 
-    getHistory: protectedProcedure.query(async ({ ctx }) => {
-      return await db.getUserQuizHistory(ctx.user.id);
-    }),
-
-    resetAttempt: protectedProcedure
-      .input(z.object({ quizId: z.number() }))
-      .mutation(async ({ ctx, input }) => {
-        // Only allow admins to reset attempts
-        if (ctx.user.role !== "admin") {
-          throw new TRPCError({
-            code: "FORBIDDEN",
-            message: "Only admins can reset quiz attempts",
-          });
-        }
-        await db.deleteQuizAttempt(ctx.user.id, input.quizId);
-        return { success: true };
+    // Get user's quiz history
+    getUserAttempts: publicProcedure
+      .input(z.object({ userId: z.number() }))
+      .query(async ({ input }) => {
+        return await db.getUserAttempts(input.userId);
       }),
   }),
 
-  rewards: router({
-    list: publicProcedure.query(async () => {
-      return await db.getAllRewards();
-    }),
-
-    redeem: protectedProcedure
-      .input(z.object({ rewardId: z.number() }))
-      .mutation(async ({ ctx, input }) => {
-        const reward = await db.getRewardById(input.rewardId);
-        if (!reward) {
-          throw new TRPCError({ code: "NOT_FOUND", message: "Reward not found" });
-        }
-
-        const user = await db.getUserByOpenId(ctx.user.openId);
-        if (!user) {
-          throw new TRPCError({ code: "NOT_FOUND", message: "User not found" });
-        }
-
-        if (user.totalCredits < reward.creditCost) {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: "Insufficient credits",
-          });
-        }
-
-        const redemptionId = await db.createRedemption({
-          userId: user.id,
-          rewardId: reward.id,
-          creditsSpent: reward.creditCost,
-          status: "pending",
-        });
-
-        await db.updateUserCredits(user.id, -reward.creditCost);
-        await db.addCreditTransaction({
-          userId: user.id,
-          amount: -reward.creditCost,
-          type: "spent",
-          description: `Redeemed: ${reward.title}`,
-          relatedId: redemptionId,
-        });
-
-        return { success: true, redemptionId };
-      }),
-
-    getRedemptions: protectedProcedure.query(async ({ ctx }) => {
-      return await db.getUserRedemptions(ctx.user.id);
-    }),
-
-    getTransactions: protectedProcedure.query(async ({ ctx }) => {
-      return await db.getUserTransactions(ctx.user.id);
-    }),
-  }),
-
+  // Leaderboard operations
   leaderboard: router({
-    get: publicProcedure
-      .input(z.object({ limit: z.number().optional().default(10) }))
+    getTop: publicProcedure
+      .input(z.object({ limit: z.number().default(10) }))
       .query(async ({ input }) => {
         return await db.getLeaderboard(input.limit);
       }),
   }),
 
-  courses: router({
-    list: publicProcedure.query(async () => {
-      return await db.getAllCourses();
+  // Rewards operations
+  rewards: router({
+    // Get all available rewards
+    getAll: publicProcedure.query(async () => {
+      return await db.getAllRewards();
     }),
 
+    // Get reward by ID
     getById: publicProcedure
-      .input(z.object({ courseId: z.number() }))
+      .input(z.object({ rewardId: z.number() }))
       .query(async ({ input }) => {
-        const course = await db.getCourseById(input.courseId);
-        if (!course) {
-          throw new TRPCError({ code: "NOT_FOUND", message: "Course not found" });
-        }
-        return course;
+        return await db.getRewardById(input.rewardId);
       }),
 
-    getModules: publicProcedure
-      .input(z.object({ courseId: z.number() }))
+    // Redeem a reward
+    redeem: publicProcedure
+      .input(z.object({
+        userId: z.number(),
+        rewardId: z.number(),
+        creditsCost: z.number(),
+      }))
+      .mutation(async ({ input }) => {
+        return await db.redeemReward(input.userId, input.rewardId, input.creditsCost);
+      }),
+
+    // Get user's redemption history
+    getUserRedemptions: publicProcedure
+      .input(z.object({ userId: z.number() }))
       .query(async ({ input }) => {
-        return await db.getCourseModules(input.courseId);
+        return await db.getUserRedemptions(input.userId);
       }),
+  }),
 
-    enroll: protectedProcedure
-      .input(z.object({ courseId: z.number() }))
-      .mutation(async ({ ctx, input }) => {
-        const enrollmentId = await db.enrollUserInCourse(ctx.user.id, input.courseId);
-        return { success: true, enrollmentId };
-      }),
-
-    getEnrollments: protectedProcedure.query(async ({ ctx }) => {
-      return await db.getUserEnrollments(ctx.user.id);
+  // Video Learning operations
+  video: router({
+    // Get all video modules
+    getAll: publicProcedure.query(async () => {
+      return await db.getAllVideoModules();
     }),
 
-    completeModule: protectedProcedure
-      .input(z.object({ moduleId: z.number() }))
-      .mutation(async ({ ctx, input }) => {
-        await db.completeModule(ctx.user.id, input.moduleId);
-        return { success: true };
+    // Get video by ID
+    getById: publicProcedure
+      .input(z.object({ videoId: z.number() }))
+      .query(async ({ input }) => {
+        return await db.getVideoModuleById(input.videoId);
       }),
 
-    getModuleCompletions: protectedProcedure
-      .input(z.object({ courseId: z.number() }))
-      .query(async ({ ctx, input }) => {
-        return await db.getUserModuleCompletions(ctx.user.id, input.courseId);
+    // Get quiz questions for a video
+    getQuizQuestions: publicProcedure
+      .input(z.object({ videoId: z.number() }))
+      .query(async ({ input }) => {
+        return await db.getVideoQuizQuestions(input.videoId);
+      }),
+
+    // Get user's progress for a video
+    getProgress: publicProcedure
+      .input(z.object({ userId: z.number(), videoId: z.number() }))
+      .query(async ({ input }) => {
+        return await db.getVideoProgress(input.userId, input.videoId);
+      }),
+
+    // Save video progress
+    saveProgress: publicProcedure
+      .input(z.object({
+        userId: z.number(),
+        videoId: z.number(),
+        currentTime: z.number(),
+        completed: z.number(),
+        quizScore: z.number().optional(),
+        totalQuizQuestions: z.number().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        return await db.saveVideoProgress(input);
+      }),
+
+    // Submit quiz answer
+    submitAnswer: publicProcedure
+      .input(z.object({
+        userId: z.number(),
+        videoId: z.number(),
+        questionId: z.number(),
+        userAnswer: z.enum(["A", "B", "C", "D"]),
+        isCorrect: z.number(),
+        attemptCount: z.number(),
+      }))
+      .mutation(async ({ input }) => {
+        const answerId = await db.saveVideoQuizAnswer(input);
+        
+        // Award credits for correct answer
+        if (input.isCorrect) {
+          const user = await db.getSimpleUserById(input.userId);
+          if (user) {
+            await db.updateUserCredits(input.userId, user.credits + 5);
+          }
+        }
+        
+        return { answerId };
+      }),
+  }),
+
+  // AI Practice operations
+  aiPractice: router({
+    // Get user's case scenarios
+    getUserScenarios: publicProcedure
+      .input(z.object({ userId: z.number() }))
+      .query(async ({ input }) => {
+        return await db.getUserCaseScenarios(input.userId);
+      }),
+
+    // Get scenario by ID
+    getScenarioById: publicProcedure
+      .input(z.object({ scenarioId: z.number() }))
+      .query(async ({ input }) => {
+        return await db.getCaseScenarioById(input.scenarioId);
+      }),
+
+    // Get scenario conversations
+    getConversations: publicProcedure
+      .input(z.object({ scenarioId: z.number() }))
+      .query(async ({ input }) => {
+        return await db.getScenarioConversations(input.scenarioId);
+      }),
+
+    // Create new AI case scenario
+    createScenario: publicProcedure
+      .input(z.object({
+        userId: z.number(),
+        category: z.string().optional(),
+        difficulty: z.enum(["easy", "medium", "hard"]).optional(),
+      }))
+      .mutation(async ({ input }) => {
+        // Get user's weak areas
+        const weakAreas = await db.getUserWeakAreas(input.userId);
+        const targetWeakArea = weakAreas.length > 0 ? weakAreas[0].category : undefined;
+        
+        // Generate AI scenario using LLM
+        const { invokeLLM } = await import("./_core/llm");
+        
+        const prompt = targetWeakArea
+          ? `Generate a learning case scenario for practicing "${targetWeakArea}". The scenario should be ${input.difficulty || "medium"} difficulty and present a realistic situation that requires applying knowledge in this area. Format: A brief scenario description (2-3 paragraphs) that sets up a problem or decision point.`
+          : `Generate a general learning case scenario for ${input.category || "general knowledge"}. The scenario should be ${input.difficulty || "medium"} difficulty. Format: A brief scenario description (2-3 paragraphs) that sets up a problem or decision point.`;
+        
+        const response = await invokeLLM({
+          messages: [
+            { role: "system", content: "You are an educational content creator specializing in creating realistic case scenarios for learning." },
+            { role: "user", content: prompt },
+          ],
+        });
+        
+        const scenario = typeof response.choices[0].message.content === 'string' 
+          ? response.choices[0].message.content 
+          : JSON.stringify(response.choices[0].message.content);
+        
+        // Save scenario
+        const scenarioId = await db.createAICaseScenario({
+          userId: input.userId,
+          scenario,
+          category: input.category,
+          difficulty: input.difficulty || "medium",
+          targetWeakArea,
+          completed: 0,
+        });
+        
+        return { scenarioId, scenario };
+      }),
+
+    // Send message in AI practice conversation
+    sendMessage: publicProcedure
+      .input(z.object({
+        scenarioId: z.number(),
+        message: z.string(),
+      }))
+      .mutation(async ({ input }) => {
+        // Get scenario and conversation history
+        const scenario = await db.getCaseScenarioById(input.scenarioId);
+        if (!scenario) throw new Error("Scenario not found");
+        
+        const conversations = await db.getScenarioConversations(input.scenarioId);
+        
+        // Save user message
+        await db.saveAIConversation({
+          scenarioId: input.scenarioId,
+          role: "user",
+          message: input.message,
+        });
+        
+        // Generate AI response
+        const { invokeLLM } = await import("./_core/llm");
+        
+        const messages = [
+          {
+            role: "system" as const,
+            content: `You are an AI tutor helping a student practice their skills through case scenarios. The current scenario is:\n\n${scenario.scenario}\n\nProvide helpful guidance, ask probing questions, and give feedback on the student's responses. Be encouraging but also point out areas for improvement.`,
+          },
+          ...conversations.map((c) => ({
+            role: c.role as "user" | "assistant",
+            content: c.message,
+          })),
+          { role: "user" as const, content: input.message },
+        ];
+        
+        const response = await invokeLLM({ messages });
+        const aiMessage = typeof response.choices[0].message.content === 'string'
+          ? response.choices[0].message.content
+          : JSON.stringify(response.choices[0].message.content);
+        
+        // Save AI response
+        await db.saveAIConversation({
+          scenarioId: input.scenarioId,
+          role: "assistant",
+          message: aiMessage,
+        });
+        
+        return { message: aiMessage };
+      }),
+
+    // Complete scenario
+    completeScenario: publicProcedure
+      .input(z.object({
+        scenarioId: z.number(),
+        score: z.number(),
+      }))
+      .mutation(async ({ input }) => {
+        await db.updateCaseScenarioCompletion(input.scenarioId, input.score);
+        
+        // Award credits
+        const scenario = await db.getCaseScenarioById(input.scenarioId);
+        if (scenario) {
+          const user = await db.getSimpleUserById(scenario.userId);
+          if (user) {
+            const creditsEarned = Math.floor(input.score * 2); // 2 credits per score point
+            await db.updateUserCredits(scenario.userId, user.credits + creditsEarned);
+            return { creditsEarned };
+          }
+        }
+        return { creditsEarned: 0 };
+      }),
+
+    // Get user's weak areas
+    getWeakAreas: publicProcedure
+      .input(z.object({ userId: z.number() }))
+      .query(async ({ input }) => {
+        return await db.getUserWeakAreas(input.userId);
       }),
   }),
 });

@@ -1,17 +1,22 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean } from "drizzle-orm/mysql-core";
+import { int, mysqlEnum, mysqlTable, text, timestamp, varchar } from "drizzle-orm/mysql-core";
 
 /**
  * Core user table backing auth flow.
+ * Extend this file with additional tables as your product grows.
+ * Columns use camelCase to match both database fields and generated types.
  */
 export const users = mysqlTable("users", {
+  /**
+   * Surrogate primary key. Auto-incremented numeric value managed by the database.
+   * Use this for relations between tables.
+   */
   id: int("id").autoincrement().primaryKey(),
+  /** Manus OAuth identifier (openId) returned from the OAuth callback. Unique per user. */
   openId: varchar("openId", { length: 64 }).notNull().unique(),
   name: text("name"),
   email: varchar("email", { length: 320 }),
   loginMethod: varchar("loginMethod", { length: 64 }),
   role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
-  totalCredits: int("totalCredits").default(0).notNull(),
-  weeklyGoalProgress: int("weeklyGoalProgress").default(0).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
@@ -20,187 +25,230 @@ export const users = mysqlTable("users", {
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
 
+// Quiz and Learning Platform Tables
+
 /**
- * Quiz questions table
+ * Simple users table for name-based login (no authentication)
+ * Tracks user names for leaderboard display
  */
-export const quizzes = mysqlTable("quizzes", {
+export const simpleUsers = mysqlTable("simple_users", {
   id: int("id").autoincrement().primaryKey(),
-  title: varchar("title", { length: 255 }).notNull(),
-  description: text("description"),
-  totalQuestions: int("totalQuestions").notNull(),
-  creditsReward: int("creditsReward").default(10).notNull(),
+  name: varchar("name", { length: 255 }).notNull().unique(),
+  credits: int("credits").default(0).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
-export type Quiz = typeof quizzes.$inferSelect;
-export type InsertQuiz = typeof quizzes.$inferInsert;
+export type SimpleUser = typeof simpleUsers.$inferSelect;
+export type InsertSimpleUser = typeof simpleUsers.$inferInsert;
 
 /**
- * Individual questions for quizzes
+ * Quiz questions table
  */
-export const questions = mysqlTable("questions", {
+export const quizQuestions = mysqlTable("quiz_questions", {
   id: int("id").autoincrement().primaryKey(),
-  quizId: int("quizId").notNull(),
-  questionText: text("questionText").notNull(),
+  question: text("question").notNull(),
   optionA: text("optionA").notNull(),
   optionB: text("optionB").notNull(),
   optionC: text("optionC").notNull(),
   optionD: text("optionD").notNull(),
   correctAnswer: mysqlEnum("correctAnswer", ["A", "B", "C", "D"]).notNull(),
-  orderIndex: int("orderIndex").notNull(),
+  difficulty: mysqlEnum("difficulty", ["easy", "medium", "hard"]).default("medium").notNull(),
+  category: varchar("category", { length: 100 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
-export type Question = typeof questions.$inferSelect;
-export type InsertQuestion = typeof questions.$inferInsert;
+export type QuizQuestion = typeof quizQuestions.$inferSelect;
+export type InsertQuizQuestion = typeof quizQuestions.$inferInsert;
 
 /**
- * User quiz attempts - tracks each time a user takes a quiz
+ * Quiz attempts table - tracks user quiz sessions
  */
-export const quizAttempts = mysqlTable("quizAttempts", {
+export const quizAttempts = mysqlTable("quiz_attempts", {
   id: int("id").autoincrement().primaryKey(),
-  userId: int("userId").notNull(),
-  quizId: int("quizId").notNull(),
+  userId: int("userId").notNull().references(() => simpleUsers.id),
   score: int("score").notNull(),
   totalQuestions: int("totalQuestions").notNull(),
-  completed: boolean("completed").default(false).notNull(),
-  creditsEarned: int("creditsEarned").default(0).notNull(),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  completedAt: timestamp("completedAt").defaultNow().notNull(),
 });
 
 export type QuizAttempt = typeof quizAttempts.$inferSelect;
 export type InsertQuizAttempt = typeof quizAttempts.$inferInsert;
 
 /**
- * User answers for each question in a quiz attempt
+ * Quiz answers table - tracks individual question responses
  */
-export const userAnswers = mysqlTable("userAnswers", {
+export const quizAnswers = mysqlTable("quiz_answers", {
   id: int("id").autoincrement().primaryKey(),
-  attemptId: int("attemptId").notNull(),
-  questionId: int("questionId").notNull(),
-  selectedAnswer: mysqlEnum("selectedAnswer", ["A", "B", "C", "D"]).notNull(),
-  isCorrect: boolean("isCorrect").notNull(),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  attemptId: int("attemptId").notNull().references(() => quizAttempts.id),
+  questionId: int("questionId").notNull().references(() => quizQuestions.id),
+  userAnswer: mysqlEnum("userAnswer", ["A", "B", "C", "D"]).notNull(),
+  isCorrect: int("isCorrect").notNull(), // 1 for true, 0 for false
+  answeredAt: timestamp("answeredAt").defaultNow().notNull(),
 });
 
-export type UserAnswer = typeof userAnswers.$inferSelect;
-export type InsertUserAnswer = typeof userAnswers.$inferInsert;
-
+export type QuizAnswer = typeof quizAnswers.$inferSelect;
+export type InsertQuizAnswer = typeof quizAnswers.$inferInsert;
 /**
- * Rewards catalog - available rewards users can redeem
+ * Rewards catalog table - available rewards that users can redeem
  */
-export const rewards = mysqlTable("rewards", {
+export const rewardsCatalog = mysqlTable("rewards_catalog", {
   id: int("id").autoincrement().primaryKey(),
-  title: varchar("title", { length: 255 }).notNull(),
-  description: text("description"),
-  creditCost: int("creditCost").notNull(),
+  name: varchar("name", { length: 255 }).notNull(),
+  description: text("description").notNull(),
   category: mysqlEnum("category", [
-    "facilities",
-    "exam",
-    "quiz",
-    "grades",
-    "voucher",
-    "parking"
+    "parking",
+    "exam_seating",
+    "facilities_booking",
+    "quiz_time",
+    "participation_points",
+    "skillsfuture",
+    "culturepass",
+    "cdc_voucher",
   ]).notNull(),
-  available: boolean("available").default(true).notNull(),
+  creditCost: int("creditCost").notNull(),
+  icon: varchar("icon", { length: 50 }), // lucide icon name
+  isActive: int("isActive").default(1).notNull(), // 1 for active, 0 for inactive
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
-export type Reward = typeof rewards.$inferSelect;
-export type InsertReward = typeof rewards.$inferInsert;
+export type RewardCatalog = typeof rewardsCatalog.$inferSelect;
+export type InsertRewardCatalog = typeof rewardsCatalog.$inferInsert;
 
 /**
- * User reward redemptions
+ * Reward redemptions table - tracks user reward claims
  */
-export const redemptions = mysqlTable("redemptions", {
+export const rewardRedemptions = mysqlTable("reward_redemptions", {
   id: int("id").autoincrement().primaryKey(),
-  userId: int("userId").notNull(),
-  rewardId: int("rewardId").notNull(),
-  creditsSpent: int("creditsSpent").notNull(),
-  status: mysqlEnum("status", ["pending", "approved", "completed", "rejected"]).default("pending").notNull(),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  userId: int("userId").notNull().references(() => simpleUsers.id),
+  rewardId: int("rewardId").notNull().references(() => rewardsCatalog.id),
+  creditsCost: int("creditsCost").notNull(),
+  status: mysqlEnum("status", ["pending", "approved", "completed", "cancelled", "expired"]).default("pending").notNull(),
+  redeemedAt: timestamp("redeemedAt").defaultNow().notNull(),
+  expiresAt: timestamp("expiresAt"), // When the reward expires
+  notes: text("notes"),
 });
 
-export type Redemption = typeof redemptions.$inferSelect;
-export type InsertRedemption = typeof redemptions.$inferInsert;
+export type RewardRedemption = typeof rewardRedemptions.$inferSelect;
+export type InsertRewardRedemption = typeof rewardRedemptions.$inferInsert;
 
 /**
- * Credit transaction history
+ * Interactive video modules table
  */
-export const creditTransactions = mysqlTable("creditTransactions", {
+export const videoModules = mysqlTable("video_modules", {
   id: int("id").autoincrement().primaryKey(),
-  userId: int("userId").notNull(),
-  amount: int("amount").notNull(),
-  type: mysqlEnum("type", ["earned", "spent", "bonus"]).notNull(),
-  description: text("description"),
-  relatedId: int("relatedId"),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
-
-export type CreditTransaction = typeof creditTransactions.$inferSelect;
-export type InsertCreditTransaction = typeof creditTransactions.$inferInsert;
-
-/**
- * Courses table
- */
-export const courses = mysqlTable("courses", {
-  id: int("id").autoincrement().primaryKey(),
-  code: varchar("code", { length: 50 }).notNull(),
   title: varchar("title", { length: 255 }).notNull(),
   description: text("description"),
-  trimester: varchar("trimester", { length: 50 }),
-  year: varchar("year", { length: 20 }),
-  endDate: timestamp("endDate"),
-  imageUrl: varchar("imageUrl", { length: 500 }),
+  videoUrl: text("videoUrl").notNull(),
+  thumbnailUrl: text("thumbnailUrl"),
+  duration: int("duration"), // in seconds
+  category: varchar("category", { length: 100 }),
+  difficulty: mysqlEnum("difficulty", ["beginner", "intermediate", "advanced"]).default("beginner").notNull(),
+  isActive: int("isActive").default(1).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
-export type Course = typeof courses.$inferSelect;
-export type InsertCourse = typeof courses.$inferInsert;
+export type VideoModule = typeof videoModules.$inferSelect;
+export type InsertVideoModule = typeof videoModules.$inferInsert;
 
 /**
- * Course modules/chapters
+ * Video quiz questions - appear during video playback
  */
-export const courseModules = mysqlTable("courseModules", {
+export const videoQuizQuestions = mysqlTable("video_quiz_questions", {
   id: int("id").autoincrement().primaryKey(),
-  courseId: int("courseId").notNull(),
-  title: varchar("title", { length: 255 }).notNull(),
-  description: text("description"),
-  orderIndex: int("orderIndex").notNull(),
-  duration: varchar("duration", { length: 50 }),
+  videoId: int("videoId").notNull().references(() => videoModules.id),
+  pauseTime: int("pauseTime").notNull(), // timestamp in seconds when to pause video
+  question: text("question").notNull(),
+  optionA: text("optionA").notNull(),
+  optionB: text("optionB").notNull(),
+  optionC: text("optionC"),
+  optionD: text("optionD"),
+  correctAnswer: mysqlEnum("correctAnswer", ["A", "B", "C", "D"]).notNull(),
+  incorrectFeedback: text("incorrectFeedback").notNull(), // What happens if wrong
+  correctFeedback: text("correctFeedback"), // Optional feedback for correct answer
+  hintText: text("hintText"), // Hint shown after incorrect answer
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
-export type CourseModule = typeof courseModules.$inferSelect;
-export type InsertCourseModule = typeof courseModules.$inferInsert;
+export type VideoQuizQuestion = typeof videoQuizQuestions.$inferSelect;
+export type InsertVideoQuizQuestion = typeof videoQuizQuestions.$inferInsert;
 
 /**
- * User course enrollments
+ * User video progress tracking
  */
-export const courseEnrollments = mysqlTable("courseEnrollments", {
+export const videoProgress = mysqlTable("video_progress", {
   id: int("id").autoincrement().primaryKey(),
-  userId: int("userId").notNull(),
-  courseId: int("courseId").notNull(),
-  progress: int("progress").default(0).notNull(),
-  enrolledAt: timestamp("enrolledAt").defaultNow().notNull(),
-  lastAccessedAt: timestamp("lastAccessedAt").defaultNow().notNull(),
+  userId: int("userId").notNull().references(() => simpleUsers.id),
+  videoId: int("videoId").notNull().references(() => videoModules.id),
+  currentTime: int("currentTime").default(0).notNull(), // last watched position in seconds
+  completed: int("completed").default(0).notNull(), // 1 if completed, 0 otherwise
+  quizScore: int("quizScore").default(0), // number of correct answers
+  totalQuizQuestions: int("totalQuizQuestions").default(0),
+  lastWatchedAt: timestamp("lastWatchedAt").defaultNow().notNull(),
 });
 
-export type CourseEnrollment = typeof courseEnrollments.$inferSelect;
-export type InsertCourseEnrollment = typeof courseEnrollments.$inferInsert;
+export type VideoProgress = typeof videoProgress.$inferSelect;
+export type InsertVideoProgress = typeof videoProgress.$inferInsert;
 
 /**
- * Module completion tracking
+ * User video quiz answers
  */
-export const moduleCompletions = mysqlTable("moduleCompletions", {
+export const videoQuizAnswers = mysqlTable("video_quiz_answers", {
   id: int("id").autoincrement().primaryKey(),
-  userId: int("userId").notNull(),
-  moduleId: int("moduleId").notNull(),
-  completed: boolean("completed").default(false).notNull(),
-  completedAt: timestamp("completedAt"),
+  userId: int("userId").notNull().references(() => simpleUsers.id),
+  videoId: int("videoId").notNull().references(() => videoModules.id),
+  questionId: int("questionId").notNull().references(() => videoQuizQuestions.id),
+  userAnswer: mysqlEnum("userAnswer", ["A", "B", "C", "D"]).notNull(),
+  isCorrect: int("isCorrect").notNull(),
+  attemptCount: int("attemptCount").default(1).notNull(), // how many tries
+  answeredAt: timestamp("answeredAt").defaultNow().notNull(),
+});
+
+export type VideoQuizAnswer = typeof videoQuizAnswers.$inferSelect;
+export type InsertVideoQuizAnswer = typeof videoQuizAnswers.$inferInsert;
+
+/**
+ * AI practice case scenarios
+ */
+export const aiCaseScenarios = mysqlTable("ai_case_scenarios", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull().references(() => simpleUsers.id),
+  scenario: text("scenario").notNull(), // AI-generated case description
+  category: varchar("category", { length: 100 }),
+  difficulty: mysqlEnum("difficulty", ["easy", "medium", "hard"]).default("medium").notNull(),
+  targetWeakArea: varchar("targetWeakArea", { length: 255 }), // what this is practicing
+  completed: int("completed").default(0).notNull(),
+  score: int("score"), // performance score
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
-export type ModuleCompletion = typeof moduleCompletions.$inferSelect;
-export type InsertModuleCompletion = typeof moduleCompletions.$inferInsert;
+export type AICaseScenario = typeof aiCaseScenarios.$inferSelect;
+export type InsertAICaseScenario = typeof aiCaseScenarios.$inferInsert;
+
+/**
+ * AI practice conversation history
+ */
+export const aiConversations = mysqlTable("ai_conversations", {
+  id: int("id").autoincrement().primaryKey(),
+  scenarioId: int("scenarioId").notNull().references(() => aiCaseScenarios.id),
+  role: mysqlEnum("role", ["user", "assistant"]).notNull(),
+  message: text("message").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type AIConversation = typeof aiConversations.$inferSelect;
+export type InsertAIConversation = typeof aiConversations.$inferInsert;
+
+/**
+ * User weak areas tracking for personalized AI practice
+ */
+export const userWeakAreas = mysqlTable("user_weak_areas", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull().references(() => simpleUsers.id),
+  category: varchar("category", { length: 100 }).notNull(),
+  incorrectCount: int("incorrectCount").default(0).notNull(),
+  totalAttempts: int("totalAttempts").default(0).notNull(),
+  lastPracticedAt: timestamp("lastPracticedAt").defaultNow().notNull(),
+});
+
+export type UserWeakArea = typeof userWeakAreas.$inferSelect;
+export type InsertUserWeakArea = typeof userWeakAreas.$inferInsert;
